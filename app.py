@@ -1,37 +1,178 @@
+from datetime import datetime, timezone
+
+
+from flask import Flask, request, jsonify
+
+
+from flask_cors import CORS
+
+
+from pydantic import ValidationError
+
+
+from models import SurveySubmission, StoredSurveyRecord
+
+
+from storage import append_json_line
+
+
+import hashlib
+
+
+
+
+
+def sha256_hash(value: str) -> str:
+
+
+   """Return the SHA-256 hex digest of the given string."""
+
+
+   return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+
+
+
+app = Flask(__name__)
+
+
+# Allow cross-origin requests so the static HTML can POST from localhost or file://
+
+
+CORS(app, resources={r"/v1/*": {"origins": "*"}})
+
+
+
+
+
+@app.route("/ping", methods=["GET"])
+
+
+def ping():
+
+
+   """Simple health check endpoint."""
+
+
+   return jsonify({
+
+
+       "status": "ok",
+
+
+       "message": "API is alive",
+
+
+       "utc_time": datetime.now(timezone.utc).isoformat()
+
+
+   })
+
+
+
+
+
 @app.post("/v1/survey")
+
+
 def submit_survey():
-    payload = request.get_json(silent=True)
-    if payload is None:
-        return jsonify({"error": "invalid_json", "detail": "Body must be application/json"}), 400
 
-    try:
-        submission = SurveySubmission(**payload)
-    except ValidationError as ve:
-        return jsonify({"error": "validation_error", "detail": ve.errors()}), 422
 
-    # Build record with enriched fields (still using raw validated values)
-    record = StoredSurveyRecord(
-        **submission.dict(),
-        received_at=datetime.now(timezone.utc),
-        ip=request.headers.get("X-Forwarded-For", request.remote_addr or ""),
-        user_agent=request.headers.get("User-Agent"),
-        submission_id=payload.get("submission_id")  # optional
-    )
+   payload = request.get_json(silent=True)
 
-    # Convert to dict so we can hash sensitive fields before writing
-    record_dict = record.dict()
 
-    # Hash PII
-    record_dict["email"] = hash_value(submission.email)   # keep original validated value
-    record_dict["age"] = hash_value(str(submission.age))
+   if payload is None:
 
-    # If no submission_id provided, compute one
-    if not record_dict.get("submission_id"):
-        base = submission.email + datetime.now().strftime("%Y%m%d%H")
-        record_dict["submission_id"] = hash_value(base)
 
-    # Write to NDJSON file
-    append_json_line(record_dict)
+       return jsonify({"error": "invalid_json", "detail": "Body must be application/json"}), 400
 
-    return jsonify({"status": "ok"}), 201
 
+
+
+
+   try:
+
+
+       submission = SurveySubmission(**payload)
+
+
+   except ValidationError as ve:
+
+
+       return jsonify({"error": "validation_error", "detail": ve.errors()}), 422
+
+
+
+
+
+   if hasattr(submission, "submission_id") and submission.submission_id:
+
+
+       sid = submission.submission_id
+
+
+   else:
+
+
+       now_str = datetime.now().strftime("%Y%m%d%H")
+
+
+       sid = sha256_hash(submission.email + now_str)
+
+
+
+
+
+   record = StoredSurveyRecord(
+
+
+       name=submission.name,
+
+
+       email=sha256_hash(submission.email),
+
+
+       age=sha256_hash(str(submission.age)),
+
+
+       consent=submission.consent,
+
+
+       rating=submission.rating,
+
+
+       comments=submission.comments,
+
+
+       user_agent=submission.user_agent,
+
+
+       submission_id=sid,
+
+
+       received_at=datetime.now(timezone.utc),
+
+
+       ip=request.headers.get("X-Forwarded-For", request.remote_addr or "")
+
+
+)
+
+
+
+
+
+   append_json_line(record.dict())
+
+
+   return jsonify({"status": "ok"}), 201
+
+
+
+
+
+if __name__ == "__main__":
+
+
+   app.run(port=5000, debug=True)
